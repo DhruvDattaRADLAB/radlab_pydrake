@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: radlab_pydrake
+Version: 0.2.9
+Summary: A simple custom package
+Home-page: https://github.com/yourusername/my_package
+Author: Your Name
+Author-email: your@email.com
+Dynamic: author
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: summary
