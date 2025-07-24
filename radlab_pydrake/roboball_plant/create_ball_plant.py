@@ -16,7 +16,6 @@ import os
 
 def add_RoboBall_plant(plant, place_in_stand=False, lumpy_bedliner=False):
     """
-        @brief: THIS WILL FINALIZE THE PLANT
 
         @param plant: the plant object to load the urdf into
         @param place_in_static_stand: options are ("hanging", "drive", "steer")
