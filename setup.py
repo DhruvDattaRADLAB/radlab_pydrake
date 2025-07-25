@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='radlab_pydrake',
-    version='0.2.9',
+    version='0.3.2',
     packages=find_packages(),
     include_package_data=True,  # Important: allows MANIFEST.in or setup.cfg to work
     package_data={

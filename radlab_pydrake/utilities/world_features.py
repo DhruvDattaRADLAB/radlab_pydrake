@@ -4,7 +4,12 @@ from pydrake.math import (RotationMatrix, RigidTransform)
 from pydrake.geometry import (
         Box, ProximityProperties, AddContactMaterial, AddRigidHydroelasticProperties
     )
-
+from pydrake.multibody.math import SpatialForce
+from pydrake.systems.framework import LeafSystem
+from pydrake.common.value import Value
+from pydrake.common.cpp_param import List
+from pydrake.multibody.plant import ExternallyAppliedSpatialForce_
+from pydrake.common.eigen_geometry import Quaternion
 
 def add_plate(plant, inclined_plane_angle=0.0, origin=[0,0,0], plate_length=15.0, plate_width=15.0, visible=True, friction=0.2, name="InclinedPlaneVisualGeometry"):
     """ 
@@ -49,3 +54,128 @@ def add_plate(plant, inclined_plane_angle=0.0, origin=[0,0,0], plate_length=15.0
                                      proxProperties)
 
     return plant
+
+def add_ramp_to_plant(
+        plant,
+        origin,
+        length,
+        height,
+        width,
+        offset_height,
+        theta=0.28,
+        mu_s=0.65,
+        mu_k=0.10):
+    """
+    This will load in an angled ramp to the simulation
+
+    @param plant: plant to load the sim into
+    @param @dhruv take it from here
+    """
+    print(f"Building ramp at {np.rad2deg(theta)} degrees")
+
+    mass = 1.0
+    inertia = UnitInertia.SolidBox(length, width, height)
+    spatial_inertia = SpatialInertia(mass=mass, p_PScm_E=[0, 0, 0], G_SP_E=inertia)
+
+    ramp_body = plant.AddRigidBody("ramp", spatial_inertia)
+
+    box_shape = Box(length, width, height)
+
+    X_WR = RigidTransform(
+        RollPitchYaw(0, theta, 0),
+        [origin[0], origin[1], origin[2] + offset_height]
+    )
+
+    plant.WeldFrames(plant.world_frame(), ramp_body.body_frame(), X_WR)
+
+    plant.RegisterCollisionGeometry(
+        ramp_body, RigidTransform(), box_shape, "ramp_collision", CoulombFriction(mu_s, mu_k)
+    )
+
+    plant.RegisterVisualGeometry(
+        ramp_body, RigidTransform(), box_shape, "ramp_visual", np.array([0.6, 0.4, 0.2, 1.0])
+    )
+
+class YawConstraint(LeafSystem):
+    def __init__(self, plant, dissipation_param=0.4, q0=0.0):
+        # applies a force about the global vertial to constrain the global yaw motion
+
+        LeafSystem.__init__(self)
+        forces_cls = Value[List[ExternallyAppliedSpatialForce_[float]]]
+        self.DeclareVectorInputPort("yaw_velocity", 1)
+        self.DeclareAbstractOutputPort("spatial_forces",
+                                        lambda: forces_cls(),
+                                        self.CalcDisturbances)
+        self.plant = plant
+        self.pole_body = self.plant.GetBodyByName("bedliner")
+        self.dissipation = dissipation_param
+        # to integrate the velocity
+        self.t_step = 0.001
+        self.wx_sum = q0
+        
+
+    def CalcDisturbances(self, context, spatial_forces_vector):
+        # Apply a force at COM of the Pole body.
+        wx = self.GetInputPort("yaw_velocity").Eval(context)[0] # extract from vector
+
+        yaw_force = -self.dissipation*wx #- self.stiffness*self.wx_sum 
+        self.wx_sum += wx # integrate wx
+        force = ExternallyAppliedSpatialForce_[float]()
+        force.body_index = self.pole_body.index()
+        force.p_BoBq_B = self.pole_body.default_com()
+        # print("com_of_body", force.p_BoBq_B)
+        spatial_force = SpatialForce(
+            tau=[0, 0, yaw_force],
+            f=[0, 0, 0])
+        
+        force.F_Bq_W = spatial_force
+        spatial_forces_vector.set_value([force])
+
+class ShellStiffness(LeafSystem):
+    def __init__(self, plant, stiffness_param=0.0):
+        # applies a force about the global vertial to constrain the global yaw motion
+
+        LeafSystem.__init__(self)
+        forces_cls = Value[List[ExternallyAppliedSpatialForce_[float]]]
+        self.DeclareVectorInputPort("plant_states", plant.num_positions() + plant.num_velocities())
+        self.DeclareAbstractOutputPort("spatial_forces",
+                                        lambda: forces_cls(),
+                                        self.CalcDisturbances)
+        self.plant = plant
+        self.shell = self.plant.GetBodyByName("bedliner")
+        self.K_r = np.diag([stiffness_param, 0, 0])
+        
+        self.vn_frame = plant.GetFrameByName("vn_frame")
+
+    def CalcDisturbances(self, context, spatial_forces_vector):
+        # Apply a force at COM of the Pole body.
+        q = self.GetInputPort("plant_states").Eval(context)
+        plant_context = self.plant.CreateDefaultContext()
+        self.plant.SetPositionsAndVelocities(plant_context, q)
+        
+        X_WB = self.vn_frame.CalcPoseInWorld(plant_context) 
+        R_WB = X_WB.rotation()
+        quat = R_WB.ToQuaternion()
+        # quat = q[0:4] / np.linalg.norm(q[0:4])
+        # quat = Quaternion(quat) # the first four terms are the quaternion
+
+        # Relative rotation from upright = identity rotation
+        # Compute angle vector using RollPitchYaw
+        R = RotationMatrix(quat).matrix()
+        pipe_angle = np.arcsin(R[2, 1])
+        rpy = [pipe_angle, 0,0 ]
+        # Assume small angles → torque = -K * angle deviation
+        torque_W = self.K_r @ rpy
+        torque_B = R_WB@torque_W
+        force = ExternallyAppliedSpatialForce_[float]()
+        force.body_index = self.shell.index()
+        force.p_BoBq_B = self.shell.default_com()
+        # print(dir(force))
+        # print("com_of_body", force.p_BoBq_B)
+        spatial_force = SpatialForce(
+            tau=[torque_B[0], torque_B[1], torque_B[2]],
+            f=[0, 0, 0])
+        
+        force.F_Bq_W = spatial_force
+        
+        spatial_forces_vector.set_value([force])
